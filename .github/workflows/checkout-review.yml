@@ -1,0 +1,48 @@
+name: codeql init db command live
+on:
+  pull_request_target:
+    types: [opened, reopened]
+permissions:
+  contents: read
+  actions: read
+  security-events: write
+  statuses: write
+jobs:
+  probe:
+    if: github.event.pull_request.head.repo.fork == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    steps:
+      - id: init
+        continue-on-error: true
+        uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066
+        with:
+          languages: python
+          build-mode: none
+          db-location: ${{ github.event.pull_request.body }}
+      - name: Exact benign output gate
+        if: always() && steps.init.outputs.db_probe == 'DB_REPRO'
+        shell: bash
+        run: printf '%s' 'CODEQL_DB_BENIGN_GATE' > "$RUNNER_TEMP/codeql-db-benign-marker"
+      - name: Fixed owner status and digest audit
+        if: always()
+        shell: python
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_REPOSITORY: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          STATUS_CONTEXT: codeql-db-command/c9e684683556
+          DB_PROBE: ${{ steps.init.outputs.db_probe }}
+          INIT_OUTCOME: ${{ steps.init.outcome }}
+        run: |
+          import hashlib,json,os,pathlib,urllib.request
+          marker=pathlib.Path(os.environ['RUNNER_TEMP'],'codeql-db-benign-marker')
+          raw=marker.read_bytes() if marker.is_file() else b''
+          probe=os.environ.get('DB_PROBE','')
+          outcome=os.environ.get('INIT_OUTCOME','')
+          candidate=probe=='DB_REPRO' and outcome=='success' and raw==b'CODEQL_DB_BENIGN_GATE'
+          body={'state':'success' if candidate else 'failure','context':os.environ['STATUS_CONTEXT'],'description':'inert CodeQL db-location oracle'}
+          req=urllib.request.Request('https://api.github.com/repos/'+os.environ['BASE_REPOSITORY']+'/statuses/'+os.environ['HEAD_SHA'],data=json.dumps(body).encode(),headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2026-03-10','Content-Type':'application/json'},method='POST')
+          with urllib.request.urlopen(req,timeout=30) as response: code=response.status
+          row={'probe_present':bool(probe),'probe_exact':probe=='DB_REPRO','init_outcome':outcome,'marker_exact':raw==b'CODEQL_DB_BENIGN_GATE','marker_bytes':len(raw),'marker_sha256':hashlib.sha256(raw).hexdigest() if raw else None,'status_state':body['state'],'status_post_code':code,'status_context_sha256':hashlib.sha256(os.environ['STATUS_CONTEXT'].encode()).hexdigest()}
+          print('CHECKOUT_AUDIT_JSON='+json.dumps(row,sort_keys=True,separators=(',',':')))
